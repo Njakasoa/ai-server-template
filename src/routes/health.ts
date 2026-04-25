@@ -17,7 +17,7 @@ health.get("/", async (c) => {
   const version = await getVersion();
   return c.json({
     ok: true,
-    name: "ai-takamoa-server",
+    name: "ai-server-template",
     version: "0.1.0",
     claudeCli: version,
     uptimeSec: Math.floor((Date.now() - startedAt) / 1000),

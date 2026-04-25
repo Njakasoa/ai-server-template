@@ -1,4 +1,4 @@
-# ai-takamoa-server
+# ai-server-template
 
 Thin HTTP server that wraps the **Claude Code CLI** (`claude`) so other services can invoke Claude over HTTP without an Anthropic API key — leveraging the Claude Code subscription already authenticated on the host.
 
@@ -53,3 +53,7 @@ Tests stub `child_process.spawn` to validate parsing/error paths without invokin
 3. Add Bearer-token auth + rate limiting.
 4. Deploy to `ai.takamoa.com` (systemd + Hostinger hPanel reverse proxy, no extra packages).
 5. Integrate from `api-server-template` CRM outbound module.
+
+---
+
+This server is intended to be deployed at **ai.takamoa.com** as the AI gateway for the takamoa stack.

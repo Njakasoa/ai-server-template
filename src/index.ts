@@ -8,7 +8,7 @@ const server = serve({ fetch: app.fetch, port: env.PORT }, (info) => {
   console.log(
     JSON.stringify({
       level: "info",
-      msg: "ai-takamoa-server listening",
+      msg: "ai-server-template listening",
       port: info.port,
       env: env.NODE_ENV,
     }),

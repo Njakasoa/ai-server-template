@@ -1,5 +1,5 @@
 {
-  "name": "ai-takamoa-server",
+  "name": "ai-server-template",
   "version": "0.1.0",
   "description": "Thin HTTP server wrapping the Claude Code CLI for ai.takamoa.com",
   "private": true,
