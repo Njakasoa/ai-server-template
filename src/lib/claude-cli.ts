@@ -1,11 +1,13 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 import { env } from "./env.js";
+import { Semaphore, SemaphoreFullError } from "./semaphore.js";
 
 export type ClaudeCliErrorCode =
   | "spawn_failed"
   | "timeout"
   | "non_zero_exit"
-  | "parse_failed";
+  | "parse_failed"
+  | "overloaded";
 
 export class ClaudeCliError extends Error {
   constructor(
@@ -54,6 +56,10 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
 
   const maxTurns = opts.maxTurns ?? env.CLAUDE_DEFAULT_MAX_TURNS;
   const timeoutMs = opts.timeoutMs ?? env.CLAUDE_TIMEOUT_MS;
+  // Hardening: this server only does text-in/JSON-out. Disable ALL claude
+  // tools (Bash, Read, Write, WebFetch, ...) so a crafted prompt cannot make
+  // claude shell out and reach the mounted OAuth credentials. `--tools ""`
+  // turns the entire tool set off; claude still produces a normal response.
   const args = [
     "-p",
     prompt,
@@ -61,6 +67,8 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
     "json",
     "--max-turns",
     String(maxTurns),
+    "--tools",
+    "",
   ];
 
   const spawnOpts: SpawnOptions = {
@@ -68,6 +76,19 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env,
   };
+
+  let release: () => void;
+  try {
+    release = await claudeSemaphore.acquire();
+  } catch (err) {
+    if (err instanceof SemaphoreFullError) {
+      throw new ClaudeCliError(
+        "overloaded",
+        "too many concurrent claude invocations; retry later",
+      );
+    }
+    throw err;
+  }
 
   const start = Date.now();
 
@@ -82,6 +103,7 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
+      release();
       fn();
     };
 
@@ -158,6 +180,11 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
     });
   });
 }
+
+const claudeSemaphore = new Semaphore(
+  env.MAX_CONCURRENT_CLAUDE,
+  env.MAX_QUEUED_CLAUDE,
+);
 
 export async function detectClaudeVersion(): Promise<string | null> {
   return new Promise((resolve) => {

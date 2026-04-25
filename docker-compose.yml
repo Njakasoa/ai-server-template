@@ -15,6 +15,23 @@ services:
       CLAUDE_DEFAULT_MAX_TURNS: "1"
       LOG_LEVEL: info
       API_TOKEN: ${API_TOKEN}
+      RATE_LIMIT_PER_MIN: "60"
+      MAX_CONCURRENT_CLAUDE: "3"
+      MAX_QUEUED_CLAUDE: "10"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+      # claude writes ephemeral state under $HOME (e.g. .npm cache); keep it
+      # in RAM so read_only stays effective without polluting the image.
+      - /home/claude/.cache:size=64M,mode=0700,uid=1001,gid=1001
+      - /home/claude/.npm:size=32M,mode=0700,uid=1001,gid=1001
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 200
     volumes:
       # Host-installed claude CLI (self-contained ELF binary), read-only.
       - /home/agent/.local/share/claude:/opt/claude/share:ro
@@ -22,6 +39,8 @@ services:
       - /home/agent/.local/bin/claude:/opt/claude/bin/claude:ro
       # Claude credentials & state. RW because the CLI refreshes OAuth tokens.
       - /home/agent/.claude:/home/claude/.claude
+      # Sibling config file claude reads/writes alongside ~/.claude/.
+      - /home/agent/.claude.json:/home/claude/.claude.json
     networks:
       - traefik
     labels:

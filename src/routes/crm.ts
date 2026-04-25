@@ -101,6 +101,7 @@ crm.post("/qualify-call", zValidator("json", QualifyBody), async (c) => {
       const status =
         err.code === "timeout" ? 504
         : err.code === "spawn_failed" ? 503
+        : err.code === "overloaded" ? 503
         : err.code === "parse_failed" ? 502
         : 500;
       return c.json(

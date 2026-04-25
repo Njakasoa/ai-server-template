@@ -32,9 +32,11 @@ test.post("/test", zValidator("json", TestBody), async (c) => {
           ? 504
           : err.code === "spawn_failed"
             ? 503
-            : err.code === "parse_failed"
-              ? 502
-              : 500;
+            : err.code === "overloaded"
+              ? 503
+              : err.code === "parse_failed"
+                ? 502
+                : 500;
       return c.json(
         {
           success: false,
