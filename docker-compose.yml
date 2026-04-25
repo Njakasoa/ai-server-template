@@ -1,0 +1,51 @@
+services:
+  ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-server-template:local
+    restart: always
+    user: "1001:1001"
+    environment:
+      NODE_ENV: production
+      PORT: "3100"
+      HOME: /home/claude
+      CLAUDE_BIN: /opt/claude/bin/claude
+      CLAUDE_TIMEOUT_MS: "60000"
+      CLAUDE_DEFAULT_MAX_TURNS: "1"
+      LOG_LEVEL: info
+      API_TOKEN: ${API_TOKEN}
+    volumes:
+      # Host-installed claude CLI (self-contained ELF binary), read-only.
+      - /home/agent/.local/share/claude:/opt/claude/share:ro
+      # Symlink-style entry point so CLAUDE_BIN stays version-agnostic.
+      - /home/agent/.local/bin/claude:/opt/claude/bin/claude:ro
+      # Claude credentials & state. RW because the CLI refreshes OAuth tokens.
+      - /home/agent/.claude:/home/claude/.claude
+    networks:
+      - traefik
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=n8n_default
+
+      - traefik.http.routers.ai.rule=Host(`ai.takamoa.com`)
+      - traefik.http.routers.ai.entrypoints=web,websecure
+      - traefik.http.routers.ai.tls=true
+      - traefik.http.routers.ai.tls.certresolver=mytlschallenge
+
+      - traefik.http.services.ai.loadbalancer.server.port=3100
+
+      - traefik.http.middlewares.ai.headers.SSLRedirect=true
+      - traefik.http.middlewares.ai.headers.STSSeconds=315360000
+      - traefik.http.middlewares.ai.headers.browserXSSFilter=true
+      - traefik.http.middlewares.ai.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.ai.headers.forceSTSHeader=true
+      - traefik.http.middlewares.ai.headers.SSLHost=ai.takamoa.com
+      - traefik.http.middlewares.ai.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.ai.headers.STSPreload=true
+      - traefik.http.routers.ai.middlewares=ai@docker
+
+networks:
+  traefik:
+    name: n8n_default
+    external: true
