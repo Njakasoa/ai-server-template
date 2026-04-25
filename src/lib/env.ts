@@ -7,6 +7,7 @@ const EnvSchema = z.object({
   CLAUDE_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   CLAUDE_DEFAULT_MAX_TURNS: z.coerce.number().int().positive().default(1),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  API_TOKEN: z.string().min(16).optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
