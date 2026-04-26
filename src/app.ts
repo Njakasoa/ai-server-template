@@ -6,6 +6,7 @@ import { bodyLimit } from "hono/body-limit";
 import { health } from "./routes/health.js";
 import { test } from "./routes/test.js";
 import { crm } from "./routes/crm.js";
+import { chat } from "./routes/chat.js";
 import { env } from "./lib/env.js";
 import { rateLimit } from "./lib/rate-limit.js";
 
@@ -34,6 +35,7 @@ export function createApp() {
     rateLimit({ windowMs: 60_000, max: env.RATE_LIMIT_PER_MIN }),
   );
   app.route("/api/v1", test);
+  app.route("/api/v1", chat);
   app.route("/api/v1/crm", crm);
   app.notFound((c) => c.json({ success: false, error: { code: "not_found" } }, 404));
   app.onError((err, c) => {

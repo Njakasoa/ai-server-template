@@ -39,6 +39,21 @@ curl -s -X POST http://localhost:3100/api/v1/test \
   -d '{"prompt":"Réponds uniquement par le nombre 42, sans rien d autre."}'
 ```
 
+### `POST /api/v1/chat` (SSE, streaming)
+Body: `{ "prompt": string, "sessionId"?: string, "systemPrompt"?: string, "maxTurns"?: number, "timeoutMs"?: number }`
+Spawns `claude --output-format stream-json --verbose --include-partial-messages` (with `--resume <sessionId>` if provided, `--append-system-prompt` if provided, and the same `--tools ""` hardening as `/api/v1/test`). Streams JSONL events back as Server-Sent Events.
+
+Event names: `session` (first, carries `sessionId` for `--resume`), `delta` (incremental text), `message` (assistant message complete), `result` (final accounting: result text, totalCostUsd, numTurns, durationMs), `error` (terminal failure with `code` matching `ClaudeCliError.code`).
+
+```bash
+curl -N -X POST http://localhost:3100/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -d '{"prompt":"Bonjour, présente-toi en une phrase."}'
+```
+
+Multi-turn: capture `sessionId` from the `session` (or `result`) event of turn N, pass it back as `sessionId` on turn N+1 to resume the conversation. Persistence relies on the `~/.claude` host bind mount in `docker-compose.yml`.
+
 ## Authentication
 
 When `API_TOKEN` is set in the environment, all `/api/*` routes require an
