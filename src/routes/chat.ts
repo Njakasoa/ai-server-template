@@ -22,7 +22,7 @@ import { ClaudeCliError, runClaudeCliStream } from "../lib/claude-cli.js";
 const ChatBody = z.object({
   prompt: z.string().min(1).max(50_000),
   sessionId: z.string().max(255).optional(),
-  systemPrompt: z.string().max(20_000).optional(),
+  systemPrompt: z.string().max(60_000).optional(),
   maxTurns: z.number().int().min(1).max(20).optional(),
   timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
 });
