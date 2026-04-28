@@ -264,6 +264,49 @@ describe("runClaudeCliStream", () => {
     });
   });
 
+  it("rejects with session_not_found when --resume <id> fails because the session is gone", async () => {
+    const fake = makeFakeProc();
+    __setSpawnForTest(((..._a: unknown[]) => fake) as never);
+
+    const it = runClaudeCliStream({
+      prompt: "x",
+      sessionId: "stale-sess-456",
+      timeoutMs: 5_000,
+    });
+    setImmediate(() => {
+      fake.stderr.emit(
+        "data",
+        Buffer.from('Error: No conversation found for "stale-sess-456" (--resume)\n'),
+      );
+      fake.emit("close", 1);
+    });
+    await assert.rejects(collect(it), (err) => {
+      assert.ok(err instanceof ClaudeCliError);
+      assert.strictEqual((err as ClaudeCliError).code, "session_not_found");
+      assert.match((err as ClaudeCliError).message, /stale-sess-456/);
+      return true;
+    });
+  });
+
+  it("keeps non_zero_exit when no sessionId was provided (fresh conversation crashes are not session_not_found)", async () => {
+    // Defensive: a fresh-conversation spawn that exits 1 for unrelated
+    // reasons must NOT be reclassified as session_not_found, even if its
+    // stderr happens to contain words that match the heuristic.
+    const fake = makeFakeProc();
+    __setSpawnForTest(((..._a: unknown[]) => fake) as never);
+
+    const it = runClaudeCliStream({ prompt: "x", timeoutMs: 5_000 });
+    setImmediate(() => {
+      fake.stderr.emit("data", Buffer.from("Error: session not found in cache"));
+      fake.emit("close", 1);
+    });
+    await assert.rejects(collect(it), (err) => {
+      assert.ok(err instanceof ClaudeCliError);
+      assert.strictEqual((err as ClaudeCliError).code, "non_zero_exit");
+      return true;
+    });
+  });
+
   it("rejects with spawn_failed on prompt empty", async () => {
     await assert.rejects(
       collect(runClaudeCliStream({ prompt: "   " })),

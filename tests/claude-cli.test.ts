@@ -71,6 +71,7 @@ describe("runClaudeCli", () => {
     });
   });
 
+
   it("rejects with parse_failed when stdout is not JSON", async () => {
     const fake = makeFakeProc();
     __setSpawnForTest(((..._args: unknown[]) => fake) as never);
