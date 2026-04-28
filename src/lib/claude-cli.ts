@@ -6,6 +6,14 @@ export type ClaudeCliErrorCode =
   | "spawn_failed"
   | "timeout"
   | "non_zero_exit"
+  // Specific case of non_zero_exit: --resume <id> was passed but the Claude
+  // session is no longer on disk. Claude may purge old sessions past its
+  // retention window even though ~/.claude/projects/ is host bind-mounted
+  // RW. The api-server orchestrator stores sessionIds long-term, so when
+  // the CLI side has dropped the session, --resume crashes. Splitting the
+  // code out lets the orchestrator retry without --resume (accepting the
+  // loss of context) instead of bubbling a generic error to the user.
+  | "session_not_found"
   | "parse_failed"
   | "overloaded"
   | "aborted";
@@ -19,6 +27,26 @@ export class ClaudeCliError extends Error {
     super(`[${code}] ${message}`);
     this.name = "ClaudeCliError";
   }
+}
+
+// Heuristic match against the CLI's stderr when --resume <id> fails
+// because the session no longer exists. Claude doesn't expose a stable
+// machine-readable error for this (it just exits 1), so we match the
+// prose patterns observed in production. Kept conservative: only treats
+// a non_zero_exit as session_not_found when the spawn actually used
+// --resume, never on a fresh-conversation spawn.
+const SESSION_MISSING_PATTERNS: readonly RegExp[] = [
+  /no\s+conversation\s+found/i,
+  /session\s+(?:.*?\s+)?not\s+found/i,
+  /could\s+not\s+find\s+session/i,
+  /unknown\s+session/i,
+  /--resume/i,
+];
+
+export function detectSessionNotFound(opts: { sessionId?: string }, stderr: string): boolean {
+  if (!opts.sessionId) return false;
+  if (!stderr) return false;
+  return SESSION_MISSING_PATTERNS.some((re) => re.test(stderr));
 }
 
 export type ClaudeCliResult = {
@@ -139,6 +167,9 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
       }
 
       if (code !== 0) {
+        // runClaudeCli (one-shot) never passes --resume so the
+        // session_not_found discrimination doesn't apply here — only the
+        // streaming variant supports --resume. Keep this branch generic.
         return finish(() =>
           reject(
             new ClaudeCliError(
@@ -428,10 +459,13 @@ export async function* runClaudeCliStream(
       return;
     }
     if (code !== 0) {
+      const sessionMissing = detectSessionNotFound(opts, stderrBuf);
       fail(
         new ClaudeCliError(
-          "non_zero_exit",
-          `claude CLI exited with code ${code}`,
+          sessionMissing ? "session_not_found" : "non_zero_exit",
+          sessionMissing
+            ? `claude session "${opts.sessionId}" no longer exists; client should retry without sessionId`
+            : `claude CLI exited with code ${code}`,
           { stderr: stderrBuf, exitCode: code },
         ),
       );
