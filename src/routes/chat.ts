@@ -70,6 +70,19 @@ chat.post("/chat", zValidator("json", ChatBody), async (c) => {
             });
             break;
           case "result":
+            // The CLI sometimes emits a result event with is_error:true and
+            // errors:[…] when the underlying model/API call failed (often
+            // paired with a non-zero exit and an empty stderr — see the
+            // forensic notes in claude-cli.ts). Forward those fields so the
+            // consumer can distinguish a real reply from a failure shaped
+            // like one. Old fields stay populated for backward compat.
+            if (event.isError) {
+              console.error(
+                `[chat] CLI returned is_error result: subtype=${event.subtype ?? "?"} errors=${
+                  event.errors ? JSON.stringify(event.errors).slice(0, 500) : "<none>"
+                }`,
+              );
+            }
             await stream.writeSSE({
               event: "result",
               data: JSON.stringify({
@@ -78,6 +91,9 @@ chat.post("/chat", zValidator("json", ChatBody), async (c) => {
                 numTurns: event.numTurns,
                 totalCostUsd: event.totalCostUsd,
                 durationMs: event.durationMs,
+                subtype: event.subtype,
+                isError: event.isError,
+                errors: event.errors,
               }),
             });
             break;
