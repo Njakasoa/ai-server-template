@@ -137,7 +137,10 @@ describe("POST /api/v1/chat", () => {
     assert.strictEqual(result.durationMs, 12);
   });
 
-  it("forwards is_error / errors / subtype on result frames", async () => {
+  it("forwards is_error / errors / subtype on result frames (non-silent failure)", async () => {
+    // Non-silent failure (stderr non-empty) — retry must NOT trigger; the
+    // result-with-isError reaches the consumer as a regular result frame
+    // followed by the error frame.
     const fake = makeFakeProc();
     __setSpawnForTest(((..._a: unknown[]) => fake) as never);
     setImmediate(() => {
@@ -154,6 +157,7 @@ describe("POST /api/v1/chat", () => {
           }) + "\n",
         ),
       );
+      fake.stderr.emit("data", Buffer.from("Anthropic API error: model overloaded"));
       fake.emit("close", 1);
     });
 
@@ -173,11 +177,277 @@ describe("POST /api/v1/chat", () => {
     assert.strictEqual(payload.isError, true);
     assert.strictEqual(payload.subtype, "error_during_execution");
     assert.deepStrictEqual(payload.errors, ["model overloaded"]);
-    // The non-zero exit still surfaces as a trailing error frame so the
-    // wire contract for hard failures is unchanged.
     const last = frames[frames.length - 1];
     assert.strictEqual(last.event, "error");
     assert.strictEqual(JSON.parse(last.data).code, "non_zero_exit");
+  });
+
+  it("retries once on silent non_zero_exit and streams the second attempt", async () => {
+    // Production failure mode: morning idle → first spawn dies with exit 1
+    // and empty stderr → the route silently retries and streams the
+    // recovered conversation. The client must see exactly one clean
+    // session / delta / message / result sequence, no error frame.
+    const stages: Array<(fake: FakeProc) => void> = [
+      (fake) => {
+        // Attempt 1: closes immediately with exit 1, no output.
+        setImmediate(() => fake.emit("close", 1));
+      },
+      (fake) => {
+        // Attempt 2: a fully successful stream.
+        setImmediate(() => {
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "system",
+                subtype: "init",
+                session_id: "recovered_sess",
+              }) + "\n",
+            ),
+          );
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "stream_event",
+                event: {
+                  type: "content_block_delta",
+                  delta: { type: "text_delta", text: "Hi" },
+                },
+              }) + "\n",
+            ),
+          );
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "assistant",
+                message: { content: [{ type: "text", text: "Hi" }] },
+              }) + "\n",
+            ),
+          );
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "result",
+                subtype: "success",
+                session_id: "recovered_sess",
+                duration_ms: 10,
+                num_turns: 1,
+                total_cost_usd: 0.0001,
+                result: "Hi",
+              }) + "\n",
+            ),
+          );
+          fake.emit("close", 0);
+        });
+      },
+    ];
+    let call = 0;
+    const argvCalls: string[][] = [];
+    __setSpawnForTest(((_bin: string, args: string[]) => {
+      argvCalls.push(args);
+      const fake = makeFakeProc();
+      stages[call++]?.(fake);
+      return fake;
+    }) as never);
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi", sessionId: "stale_sess" }),
+      }),
+    );
+    assert.strictEqual(res.status, 200);
+    const frames = parseSse(await readAll(res.body));
+    const events = frames.map((f) => f.event);
+    assert.deepStrictEqual(events, ["session", "delta", "message", "result"]);
+    assert.strictEqual(
+      JSON.parse(frames[0].data).sessionId,
+      "recovered_sess",
+      "client should only see the recovered session id, not a phantom one",
+    );
+    // Spawn invoked twice: once with --resume for attempt 1, once without.
+    assert.strictEqual(call, 2);
+    assert.ok(argvCalls[0].includes("--resume"), "attempt 1 should pass --resume");
+    assert.strictEqual(
+      argvCalls[1].indexOf("--resume"),
+      -1,
+      "attempt 2 must drop --resume so a stale-session crash doesn't repeat",
+    );
+  });
+
+  it("retries when attempt 1 emits a result with is_error before any content", async () => {
+    // CLI may write its error as a result line with is_error:true on
+    // stdout (often with empty stderr) before exiting 1. As long as
+    // nothing has been streamed to the client yet, the route treats
+    // this exactly like the silent failure case.
+    let call = 0;
+    __setSpawnForTest(((..._a: unknown[]) => {
+      const fake = makeFakeProc();
+      if (call++ === 0) {
+        setImmediate(() => {
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "result",
+                subtype: "error_during_execution",
+                is_error: true,
+                duration_ms: 0,
+                result: "",
+                errors: ["transient hiccup"],
+              }) + "\n",
+            ),
+          );
+          fake.emit("close", 1);
+        });
+      } else {
+        setImmediate(() => {
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "assistant",
+                message: { content: [{ type: "text", text: "ok" }] },
+              }) + "\n",
+            ),
+          );
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "result",
+                subtype: "success",
+                duration_ms: 4,
+                result: "ok",
+              }) + "\n",
+            ),
+          );
+          fake.emit("close", 0);
+        });
+      }
+      return fake;
+    }) as never);
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      }),
+    );
+    const frames = parseSse(await readAll(res.body));
+    // No error frame, no phantom is_error result.
+    assert.ok(
+      !frames.some((f) => f.event === "error"),
+      "no error frame should reach the client after a successful retry",
+    );
+    const resultFrame = frames.find((f) => f.event === "result");
+    assert.ok(resultFrame);
+    const payload = JSON.parse(resultFrame!.data);
+    assert.strictEqual(payload.result, "ok");
+    assert.notStrictEqual(payload.isError, true);
+  });
+
+  it("does not retry when the failure has stderr (caller can see the cause)", async () => {
+    let call = 0;
+    __setSpawnForTest(((..._a: unknown[]) => {
+      call++;
+      const fake = makeFakeProc();
+      setImmediate(() => {
+        fake.stderr.emit("data", Buffer.from("permission denied"));
+        fake.emit("close", 1);
+      });
+      return fake;
+    }) as never);
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      }),
+    );
+    const frames = parseSse(await readAll(res.body));
+    const last = frames[frames.length - 1];
+    assert.strictEqual(last.event, "error");
+    assert.strictEqual(call, 1, "spawn must be called exactly once");
+  });
+
+  it("does not retry once content has been streamed to the client", async () => {
+    let call = 0;
+    __setSpawnForTest(((..._a: unknown[]) => {
+      call++;
+      const fake = makeFakeProc();
+      setImmediate(() => {
+        fake.stdout.emit(
+          "data",
+          Buffer.from(
+            JSON.stringify({ type: "system", subtype: "init", session_id: "s" }) + "\n",
+          ),
+        );
+        fake.stdout.emit(
+          "data",
+          Buffer.from(
+            JSON.stringify({
+              type: "stream_event",
+              event: {
+                type: "content_block_delta",
+                delta: { type: "text_delta", text: "He" },
+              },
+            }) + "\n",
+          ),
+        );
+        // Silent non_zero_exit AFTER content already streamed.
+        fake.emit("close", 1);
+      });
+      return fake;
+    }) as never);
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      }),
+    );
+    const frames = parseSse(await readAll(res.body));
+    const kinds = frames.map((f) => f.event);
+    assert.deepStrictEqual(kinds, ["session", "delta", "error"]);
+    assert.strictEqual(call, 1, "spawn must not be retried once content has been streamed");
+  });
+
+  it("surfaces error frame when both attempts fail silently", async () => {
+    let call = 0;
+    __setSpawnForTest(((..._a: unknown[]) => {
+      call++;
+      const fake = makeFakeProc();
+      setImmediate(() => fake.emit("close", 1));
+      return fake;
+    }) as never);
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      }),
+    );
+    const frames = parseSse(await readAll(res.body));
+    assert.strictEqual(call, 2, "spawn must be retried exactly once");
+    // Client should see only the final error frame, no phantom frames
+    // from either attempt.
+    assert.deepStrictEqual(frames.map((f) => f.event), ["error"]);
+    const payload = JSON.parse(frames[0].data);
+    assert.strictEqual(payload.code, "non_zero_exit");
   });
 
   it("emits an error SSE event when the CLI fails", async () => {
