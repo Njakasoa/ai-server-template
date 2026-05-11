@@ -137,6 +137,49 @@ describe("POST /api/v1/chat", () => {
     assert.strictEqual(result.durationMs, 12);
   });
 
+  it("forwards is_error / errors / subtype on result frames", async () => {
+    const fake = makeFakeProc();
+    __setSpawnForTest(((..._a: unknown[]) => fake) as never);
+    setImmediate(() => {
+      fake.stdout.emit(
+        "data",
+        Buffer.from(
+          JSON.stringify({
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            duration_ms: 5,
+            result: "",
+            errors: ["model overloaded"],
+          }) + "\n",
+        ),
+      );
+      fake.emit("close", 1);
+    });
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi" }),
+      }),
+    );
+    assert.strictEqual(res.status, 200);
+    const frames = parseSse(await readAll(res.body));
+    const result = frames.find((f) => f.event === "result");
+    assert.ok(result, "expected a result frame");
+    const payload = JSON.parse(result!.data);
+    assert.strictEqual(payload.isError, true);
+    assert.strictEqual(payload.subtype, "error_during_execution");
+    assert.deepStrictEqual(payload.errors, ["model overloaded"]);
+    // The non-zero exit still surfaces as a trailing error frame so the
+    // wire contract for hard failures is unchanged.
+    const last = frames[frames.length - 1];
+    assert.strictEqual(last.event, "error");
+    assert.strictEqual(JSON.parse(last.data).code, "non_zero_exit");
+  });
+
   it("emits an error SSE event when the CLI fails", async () => {
     const fake = makeFakeProc();
     __setSpawnForTest(((..._a: unknown[]) => fake) as never);

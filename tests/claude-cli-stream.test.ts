@@ -264,6 +264,53 @@ describe("runClaudeCliStream", () => {
     });
   });
 
+  it("surfaces is_error / errors / subtype on result events (model/API failures)", async () => {
+    // Reproduces the production failure mode: the CLI exits 1 with stderr
+    // empty and the actual error written on stdout as a result line. The
+    // result event yielded to the consumer must carry isError / errors so
+    // the route can distinguish this from a successful reply.
+    const fake = makeFakeProc();
+    __setSpawnForTest(((..._a: unknown[]) => fake) as never);
+
+    const it = runClaudeCliStream({ prompt: "x", timeoutMs: 5_000 });
+    setImmediate(() => {
+      fake.stdout.emit(
+        "data",
+        Buffer.from(
+          JSON.stringify({
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            duration_ms: 0,
+            result: "",
+            errors: ["Anthropic API: model is currently overloaded"],
+          }) + "\n",
+        ),
+      );
+      fake.emit("close", 1);
+    });
+
+    const events: ClaudeStreamEvent[] = [];
+    await assert.rejects(
+      (async () => {
+        for await (const ev of it) events.push(ev);
+      })(),
+      (err) => {
+        assert.ok(err instanceof ClaudeCliError);
+        assert.strictEqual((err as ClaudeCliError).code, "non_zero_exit");
+        return true;
+      },
+    );
+    assert.strictEqual(events.length, 1);
+    const r = events[0] as Extract<ClaudeStreamEvent, { kind: "result" }>;
+    assert.strictEqual(r.kind, "result");
+    assert.strictEqual(r.isError, true);
+    assert.strictEqual(r.subtype, "error_during_execution");
+    assert.deepStrictEqual(r.errors, [
+      "Anthropic API: model is currently overloaded",
+    ]);
+  });
+
   it("rejects with session_not_found when --resume <id> fails because the session is gone", async () => {
     const fake = makeFakeProc();
     __setSpawnForTest(((..._a: unknown[]) => fake) as never);

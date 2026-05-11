@@ -77,6 +77,21 @@ export function __resetSpawnForTest(): void {
   spawnImpl = spawn;
 }
 
+function logCliFailure(
+  source: string,
+  exitCode: number | null,
+  stderr: string,
+  stdoutTail: string,
+): void {
+  const stderrSnip = stderr.trim().slice(-2000);
+  const stdoutSnip = stdoutTail.trim().slice(-500);
+  console.error(
+    `[claude-cli] ${source} exit=${exitCode}\n` +
+      `  stderr: ${stderrSnip || "<empty>"}\n` +
+      (stdoutSnip ? `  stdout-tail: ${stdoutSnip}\n` : ""),
+  );
+}
+
 export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliResult> {
   const prompt = opts.prompt.trim();
   if (!prompt) {
@@ -170,6 +185,7 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
         // runClaudeCli (one-shot) never passes --resume so the
         // session_not_found discrimination doesn't apply here — only the
         // streaming variant supports --resume. Keep this branch generic.
+        logCliFailure("runClaudeCli", code, stderr, stdout);
         return finish(() =>
           reject(
             new ClaudeCliError(
@@ -200,6 +216,7 @@ export async function runClaudeCli(opts: ClaudeCliOptions): Promise<ClaudeCliRes
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        logCliFailure("runClaudeCli:parse", code, stderr, stdout);
         finish(() =>
           reject(
             new ClaudeCliError("parse_failed", `failed to parse JSON: ${msg}`, {
@@ -240,6 +257,14 @@ export type ClaudeStreamEvent =
       numTurns?: number;
       totalCostUsd?: number;
       durationMs: number;
+      // The CLI writes errors back through stdout result lines (often with
+      // exit==1 and no stderr at all), e.g.:
+      //   {"type":"result","subtype":"error_during_execution","is_error":true,"errors":["…"]}
+      // Surfacing these lets the route hand them to the consumer instead of
+      // forwarding a fake-success result followed by a bare non_zero_exit.
+      subtype?: string;
+      isError?: boolean;
+      errors?: string[];
       raw: unknown;
     };
 
@@ -258,6 +283,12 @@ export type ClaudeChatOptions = {
 // in the worst case (mostly small deltas) — enough headroom without risking
 // OOM if the consumer wedges.
 const MAX_QUEUED_EVENTS = 1000;
+
+// Per-call retention cap for the raw stdout tail kept around for diagnostics.
+// 8 KB is enough to hold a full result-line JSON (including a long errors[]
+// array) plus a couple of preceding events, but small enough that the
+// memory cost is negligible on a 512 MB container.
+const STDOUT_TAIL_LIMIT = 8192;
 
 function classifyStreamLine(parsed: any): ClaudeStreamEvent | null {
   if (!parsed || typeof parsed !== "object") return null;
@@ -283,6 +314,9 @@ function classifyStreamLine(parsed: any): ClaudeStreamEvent | null {
     return null;
   }
   if (type === "result") {
+    const errors = Array.isArray(parsed.errors)
+      ? parsed.errors.filter((e: unknown): e is string => typeof e === "string")
+      : undefined;
     return {
       kind: "result",
       result: typeof parsed.result === "string" ? parsed.result : "",
@@ -290,6 +324,9 @@ function classifyStreamLine(parsed: any): ClaudeStreamEvent | null {
       numTurns: typeof parsed.num_turns === "number" ? parsed.num_turns : undefined,
       totalCostUsd: typeof parsed.total_cost_usd === "number" ? parsed.total_cost_usd : undefined,
       durationMs: typeof parsed.duration_ms === "number" ? parsed.duration_ms : 0,
+      subtype: typeof parsed.subtype === "string" ? parsed.subtype : undefined,
+      isError: parsed.is_error === true,
+      errors: errors && errors.length > 0 ? errors : undefined,
       raw: parsed,
     };
   }
@@ -347,6 +384,12 @@ export async function* runClaudeCliStream(
   const queue: ClaudeStreamEvent[] = [];
   let stderrBuf = "";
   let lineBuf = "";
+  // Forensic ring buffer: the last STDOUT_TAIL_LIMIT bytes of raw stdout,
+  // including lines we successfully parsed and dispatched. Without this, a
+  // CLI failure that wrote its real diagnostic on stdout (e.g. a
+  // result/is_error line) would log as "stderr: <empty>" — the stdout was
+  // consumed line-by-line and gone by the time `close` fires.
+  let stdoutTailBuf = "";
   let endError: Error | null = null;
   let ended = false;
   let pending: { resolve: () => void; reject: (e: Error) => void } | null = null;
@@ -405,7 +448,9 @@ export async function* runClaudeCliStream(
   }
 
   proc.stdout?.on("data", (chunk: Buffer | string) => {
-    lineBuf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    lineBuf += text;
+    stdoutTailBuf = (stdoutTailBuf + text).slice(-STDOUT_TAIL_LIMIT);
     let nl: number;
     // Process every complete line. Partial trailing line stays in lineBuf.
     while ((nl = lineBuf.indexOf("\n")) !== -1) {
@@ -460,6 +505,9 @@ export async function* runClaudeCliStream(
     }
     if (code !== 0) {
       const sessionMissing = detectSessionNotFound(opts, stderrBuf);
+      if (!sessionMissing) {
+        logCliFailure("runClaudeCliStream", code, stderrBuf, stdoutTailBuf);
+      }
       fail(
         new ClaudeCliError(
           sessionMissing ? "session_not_found" : "non_zero_exit",
