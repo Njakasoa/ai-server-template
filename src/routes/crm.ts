@@ -9,6 +9,26 @@ import {
 } from "../prompts/qualify-call.js";
 import { qualifyCallSchema } from "../types/qualification.js";
 
+const QualifyScriptStep = z.object({
+  id: z.string().min(1).max(100),
+  type: z.enum(["instruction", "question", "yesno", "checklist", "select"]),
+  label: z.string().min(1).max(1000),
+  options: z.array(z.string().min(1).max(500)).max(50).optional(),
+  response: z
+    .object({
+      value: z.unknown(),
+      notes: z.string().max(5000).optional(),
+    })
+    .optional(),
+});
+
+const QualifyScript = z.object({
+  templateName: z.string().min(1).max(255),
+  templateDescription: z.string().max(2000).optional(),
+  status: z.enum(["in_progress", "completed"]).optional(),
+  steps: z.array(QualifyScriptStep).min(1).max(200),
+});
+
 const QualifyBody = z.object({
   transcript: z.string().min(1).max(50_000),
   metadata: z.object({
@@ -20,6 +40,7 @@ const QualifyBody = z.object({
     contactPhone: z.string().max(30).optional(),
     callRecordedByRingover: z.boolean().optional(),
   }).default({}),
+  script: QualifyScript.optional(),
   maxTurns: z.number().int().min(1).max(3).optional(),
   timeoutMs: z.number().int().min(5_000).max(300_000).optional(),
 });
