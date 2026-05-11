@@ -73,6 +73,28 @@ describe("buildQualifyCallUserPrompt", () => {
     assert.ok(out.indexOf("# Script suivi pendant l'appel") < out.indexOf("# Transcription brute"));
   });
 
+  it("renders a no-transcript prompt when only a script is provided", () => {
+    const out = buildQualifyCallUserPrompt({
+      metadata: { direction: "outbound" as const, agentName: "Alice" },
+      script: {
+        templateName: "Manual outbound — no Ringover",
+        steps: [
+          {
+            id: "still_employed",
+            type: "yesno",
+            label: "Êtes-vous toujours en poste ?",
+            response: { value: false, notes: "rupture conventionnelle en mars" },
+          },
+        ],
+      },
+    });
+    assert.ok(out.includes("pas de transcription disponible"));
+    assert.ok(out.includes("# Script suivi pendant l'appel"));
+    assert.ok(out.includes("Manual outbound — no Ringover"));
+    assert.ok(out.includes("aucune transcription disponible"));
+    assert.ok(!out.includes("Voici la transcription brute Ringover d'un appel"));
+  });
+
   it("truncates an oversized script section with a visible marker", () => {
     const bigLabel = "A".repeat(900);
     const steps = Array.from({ length: 50 }, (_, i) => ({
