@@ -1,6 +1,7 @@
 export const QUALIFY_CALL_SYSTEM_PROMPT = `
 Tu es un assistant qui qualifie automatiquement des appels téléphoniques sortants pour le CRM
-Opus Formation à partir de la transcription brute fournie par Ringover.
+Opus Formation à partir des informations fournies (transcription brute Ringover et/ou
+script suivi pendant l'appel avec les réponses saisies par l'agent).
 
 Tu DOIS retourner UNIQUEMENT un objet JSON valide (pas de markdown, pas de fences \`\`\`,
 pas de prose, pas d'explication). La sortie doit pouvoir être parsée par JSON.parse() directement.
@@ -152,11 +153,15 @@ du contexte. Pas de PII inutile.
 
 # En cas de doute
 
-- Si la transcription est trop courte/floue pour qualifier ⇒ scenario "A",
-  subScenario "appel_interrompu", endWithoutFullQualification = true,
-  nextAction = "rappel".
+- Si la transcription est trop courte/floue pour qualifier (ou absente, et que le script ne
+  contient pas non plus assez d'information) ⇒ scenario "A", subScenario "appel_interrompu",
+  endWithoutFullQualification = true, nextAction = "rappel".
 - Ne jamais inventer un employeur, un poste, un nom, ou une date qui n'apparaît pas dans la
-  transcription. Laisse le champ absent (undefined) plutôt que de halluciner.
+  transcription ou les réponses au script. Laisse le champ absent (undefined) plutôt que
+  de halluciner.
+- Quand la transcription est absente, base-toi sur les réponses agent du script comme
+  source de vérité (et garde-les comme vérité-terrain). Quand la transcription est
+  présente et contredit le script, la transcription prime.
 `.trim();
 
 export type QualifyCallScriptStep = {
@@ -234,7 +239,7 @@ function renderScriptSection(script: QualifyCallScript): string {
 }
 
 export function buildQualifyCallUserPrompt(input: {
-  transcript: string;
+  transcript?: string;
   metadata: {
     callId?: string;
     direction?: "inbound" | "outbound";
@@ -247,8 +252,17 @@ export function buildQualifyCallUserPrompt(input: {
   script?: QualifyCallScript;
 }): string {
   const meta = input.metadata;
+  const transcript = input.transcript?.trim();
+  const hasTranscript = !!transcript && transcript.length > 0;
+  const hasScript = !!input.script && input.script.steps.length > 0;
   const lines: string[] = [];
-  lines.push("Voici la transcription brute Ringover d'un appel à qualifier.\n");
+  lines.push(
+    hasTranscript
+      ? "Voici la transcription brute Ringover d'un appel à qualifier.\n"
+      : "Voici les informations d'un appel à qualifier — pas de transcription disponible " +
+          "(Ringover non utilisé ou Smart Voice indisponible). Base-toi sur les réponses " +
+          "saisies par l'agent dans le script ci-dessous.\n",
+  );
   lines.push("# Métadonnées de l'appel");
   if (meta.callId) lines.push(`- callId: ${meta.callId}`);
   if (meta.direction) lines.push(`- direction: ${meta.direction}`);
@@ -259,12 +273,20 @@ export function buildQualifyCallUserPrompt(input: {
   if (typeof meta.callRecordedByRingover === "boolean") {
     lines.push(`- callRecordedByRingover: ${meta.callRecordedByRingover}`);
   }
-  if (input.script && input.script.steps.length > 0) {
+  if (hasScript) {
     lines.push("");
-    lines.push(renderScriptSection(input.script));
+    lines.push(renderScriptSection(input.script!));
   }
-  lines.push("\n# Transcription brute\n");
-  lines.push(input.transcript.trim());
+  if (hasTranscript) {
+    lines.push("\n# Transcription brute\n");
+    lines.push(transcript!);
+  } else {
+    lines.push("\n# Transcription brute\n");
+    lines.push(
+      "(aucune transcription disponible — qualifie l'appel en t'appuyant sur les " +
+        "réponses agent du script ci-dessus et les métadonnées).",
+    );
+  }
   lines.push("\n# Tâche\n");
   lines.push(
     "Renvoie UNIQUEMENT le JSON de qualification conforme au schéma défini dans le system prompt. " +

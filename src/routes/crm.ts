@@ -29,21 +29,39 @@ const QualifyScript = z.object({
   steps: z.array(QualifyScriptStep).min(1).max(200),
 });
 
-const QualifyBody = z.object({
-  transcript: z.string().min(1).max(50_000),
-  metadata: z.object({
-    callId: z.string().max(255).optional(),
-    direction: z.enum(["inbound", "outbound"]).optional(),
-    durationSeconds: z.number().int().min(0).optional(),
-    agentName: z.string().max(255).optional(),
-    contactName: z.string().max(255).optional(),
-    contactPhone: z.string().max(30).optional(),
-    callRecordedByRingover: z.boolean().optional(),
-  }).default({}),
-  script: QualifyScript.optional(),
-  maxTurns: z.number().int().min(1).max(3).optional(),
-  timeoutMs: z.number().int().min(5_000).max(300_000).optional(),
-});
+const QualifyBody = z
+  .object({
+    // Transcript is optional so callers without a Ringover integration (or with
+    // Ringover but no Smart Voice transcript) can still get an AI suggestion
+    // from just the call script + agent responses. At least one of the two
+    // context sources must be present — enforced by the superRefine below.
+    transcript: z.string().min(1).max(50_000).optional(),
+    metadata: z
+      .object({
+        callId: z.string().max(255).optional(),
+        direction: z.enum(["inbound", "outbound"]).optional(),
+        durationSeconds: z.number().int().min(0).optional(),
+        agentName: z.string().max(255).optional(),
+        contactName: z.string().max(255).optional(),
+        contactPhone: z.string().max(30).optional(),
+        callRecordedByRingover: z.boolean().optional(),
+      })
+      .default({}),
+    script: QualifyScript.optional(),
+    maxTurns: z.number().int().min(1).max(3).optional(),
+    timeoutMs: z.number().int().min(5_000).max(300_000).optional(),
+  })
+  .superRefine((val, ctx) => {
+    const hasTranscript = !!val.transcript && val.transcript.trim().length > 0;
+    const hasScript = !!val.script && val.script.steps.length > 0;
+    if (!hasTranscript && !hasScript) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "At least one of `transcript` or `script` must be provided",
+        path: ["transcript"],
+      });
+    }
+  });
 
 const crm = new Hono();
 
