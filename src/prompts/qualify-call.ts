@@ -159,6 +159,80 @@ du contexte. Pas de PII inutile.
   transcription. Laisse le champ absent (undefined) plutôt que de halluciner.
 `.trim();
 
+export type QualifyCallScriptStep = {
+  id: string;
+  type: "instruction" | "question" | "yesno" | "checklist" | "select";
+  label: string;
+  options?: string[];
+  response?: {
+    value?: unknown;
+    notes?: string;
+  };
+};
+
+export type QualifyCallScript = {
+  templateName: string;
+  templateDescription?: string;
+  status?: "in_progress" | "completed";
+  steps: QualifyCallScriptStep[];
+};
+
+// Soft cap on the script section so a runaway long template can't push the
+// transcript out of the model's context window. Anything past this is dropped
+// with a visible truncation marker.
+const SCRIPT_SECTION_CHAR_LIMIT = 30_000;
+
+function formatScriptResponseValue(value: unknown): string {
+  if (value === undefined || value === null) return "(pas de réponse enregistrée)";
+  if (typeof value === "string") return value.trim().length === 0 ? "(vide)" : value;
+  if (typeof value === "boolean") return value ? "oui" : "non";
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map((v) => formatScriptResponseValue(v)).join(", ");
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function renderScriptSection(script: QualifyCallScript): string {
+  const lines: string[] = [];
+  lines.push("# Script suivi pendant l'appel");
+  lines.push(`- templateName: ${script.templateName}`);
+  if (script.templateDescription) lines.push(`- templateDescription: ${script.templateDescription}`);
+  if (script.status) lines.push(`- status: ${script.status}`);
+  lines.push("");
+  lines.push(
+    "Voici la trame que l'agent était censé suivre, avec ses réponses telles que saisies " +
+    "pendant l'appel. Si la transcription contredit une réponse, garde la transcription comme " +
+    "vérité-terrain ; les réponses ci-dessous sont indicatives.",
+  );
+  lines.push("");
+
+  for (const [i, step] of script.steps.entries()) {
+    lines.push(`## ${i + 1}. [${step.type}] ${step.label}`);
+    if (step.options && step.options.length > 0) {
+      lines.push(`- options: ${step.options.join(" | ")}`);
+    }
+    if (step.response) {
+      lines.push(`- réponse agent: ${formatScriptResponseValue(step.response.value)}`);
+      if (step.response.notes && step.response.notes.trim().length > 0) {
+        lines.push(`- notes agent: ${step.response.notes.trim()}`);
+      }
+    } else if (step.type !== "instruction") {
+      lines.push("- réponse agent: (non renseignée)");
+    }
+    lines.push("");
+  }
+
+  const rendered = lines.join("\n");
+  if (rendered.length <= SCRIPT_SECTION_CHAR_LIMIT) return rendered;
+  return (
+    rendered.slice(0, SCRIPT_SECTION_CHAR_LIMIT) +
+    `\n\n[…tronqué : section script > ${SCRIPT_SECTION_CHAR_LIMIT} caractères]`
+  );
+}
+
 export function buildQualifyCallUserPrompt(input: {
   transcript: string;
   metadata: {
@@ -170,6 +244,7 @@ export function buildQualifyCallUserPrompt(input: {
     contactPhone?: string;
     callRecordedByRingover?: boolean;
   };
+  script?: QualifyCallScript;
 }): string {
   const meta = input.metadata;
   const lines: string[] = [];
@@ -183,6 +258,10 @@ export function buildQualifyCallUserPrompt(input: {
   if (meta.contactPhone) lines.push(`- contactPhone: ${meta.contactPhone}`);
   if (typeof meta.callRecordedByRingover === "boolean") {
     lines.push(`- callRecordedByRingover: ${meta.callRecordedByRingover}`);
+  }
+  if (input.script && input.script.steps.length > 0) {
+    lines.push("");
+    lines.push(renderScriptSection(input.script));
   }
   lines.push("\n# Transcription brute\n");
   lines.push(input.transcript.trim());
