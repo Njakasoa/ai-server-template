@@ -2,7 +2,12 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { ClaudeCliError, runClaudeCliStream } from "../lib/claude-cli.js";
+import {
+  AiProviderError,
+  aiProviderSchema,
+  resolveProvider,
+  runProviderStream,
+} from "../lib/ai-provider.js";
 
 // Phase 1 of the chatbot roadmap. This endpoint exposes the streaming chat
 // surface that api-server-template's orchestrator (Phase 2) will consume.
@@ -21,6 +26,7 @@ import { ClaudeCliError, runClaudeCliStream } from "../lib/claude-cli.js";
 
 const ChatBody = z.object({
   prompt: z.string().min(1).max(50_000),
+  provider: aiProviderSchema.optional(),
   sessionId: z.string().max(255).optional(),
   systemPrompt: z.string().max(60_000).optional(),
   maxTurns: z.number().int().min(1).max(20).optional(),
@@ -35,19 +41,32 @@ const chat = new Hono();
 // streams live.
 type Emitter = () => Promise<void>;
 
-function isSilentNonZeroExit(err: unknown): err is ClaudeCliError {
+function isSilentNonZeroExit(err: unknown): err is AiProviderError {
   return (
-    err instanceof ClaudeCliError &&
+    err instanceof AiProviderError &&
     err.code === "non_zero_exit" &&
     !err.details?.stderr?.trim()
   );
 }
 
+// Retryable when the CLI explicitly reported that the supplied sessionId
+// does not exist on disk. Covers two real-world cases:
+//   1. Stale session: the CLI purged old conversations past its retention
+//      window but the caller still has the id.
+//   2. Cross-provider sessionId: a Claude session passed to Codex (or the
+//      reverse). Sessions are namespaced per-provider; the other CLI has
+//      no record of it. Better to drop the id and start fresh than to
+//      hard-fail the user.
+function isStaleSession(err: unknown): err is AiProviderError {
+  return err instanceof AiProviderError && err.code === "session_not_found";
+}
+
 chat.post("/chat", zValidator("json", ChatBody), async (c) => {
   const body = c.req.valid("json");
+  const provider = resolveProvider(body.provider);
   // Hono's streamSSE ties the SSE lifecycle to the response. We forward the
   // request abort signal into the CLI iterator so a client disconnect kills
-  // the spawned claude promptly (and frees the concurrency slot).
+  // the spawned CLI promptly (and frees the concurrency slot).
   const abort = new AbortController();
   c.req.raw.signal.addEventListener("abort", () => abort.abort(), { once: true });
 
@@ -68,7 +87,7 @@ chat.post("/chat", zValidator("json", ChatBody), async (c) => {
       attempt++;
       const useSession = attempt === 1 ? body.sessionId : undefined;
 
-      const iterator = runClaudeCliStream({
+      const iterator = runProviderStream(provider, {
         prompt: body.prompt,
         sessionId: useSession,
         systemPrompt: body.systemPrompt,
@@ -170,10 +189,13 @@ chat.post("/chat", zValidator("json", ChatBody), async (c) => {
         return;
       } catch (err) {
         lastErr = err;
-        const canRetry = attempt === 1 && !flushed && isSilentNonZeroExit(err);
+        const silent = isSilentNonZeroExit(err);
+        const stale = isStaleSession(err);
+        const canRetry = attempt === 1 && !flushed && (silent || stale);
         if (canRetry) {
+          const reason = stale ? "session_not_found" : "silent non_zero_exit";
           console.warn(
-            `[chat] silent non_zero_exit on attempt 1; retrying once without sessionId (had_session=${
+            `[chat] ${reason} on attempt 1; retrying once without sessionId (provider=${provider}, had_session=${
               body.sessionId ? "yes" : "no"
             })`,
           );
@@ -192,12 +214,13 @@ chat.post("/chat", zValidator("json", ChatBody), async (c) => {
 
     const err = lastErr;
     if (!err) return;
-    const errCode = err instanceof ClaudeCliError ? err.code : "internal";
+    const errCode = err instanceof AiProviderError ? err.code : "internal";
+    const errProvider = err instanceof AiProviderError ? err.provider : provider;
     const errMessage = err instanceof Error ? err.message : String(err);
     try {
       await stream.writeSSE({
         event: "error",
-        data: JSON.stringify({ code: errCode, message: errMessage }),
+        data: JSON.stringify({ code: errCode, provider: errProvider, message: errMessage }),
       });
     } catch {
       // stream may already be closed by the client; nothing to do.
