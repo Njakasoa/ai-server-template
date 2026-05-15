@@ -10,14 +10,21 @@ services:
       NODE_ENV: production
       PORT: "3100"
       HOME: /home/claude
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-claude}
       CLAUDE_BIN: /opt/claude/bin/claude
       CLAUDE_TIMEOUT_MS: "60000"
       CLAUDE_DEFAULT_MAX_TURNS: "1"
+      CODEX_BIN: /opt/codex/bin/codex
+      CODEX_TIMEOUT_MS: "60000"
+      CODEX_DEFAULT_MAX_TURNS: "1"
+      CODEX_SANDBOX: read-only
       LOG_LEVEL: info
       API_TOKEN: ${API_TOKEN}
       RATE_LIMIT_PER_MIN: "60"
       MAX_CONCURRENT_CLAUDE: "3"
       MAX_QUEUED_CLAUDE: "10"
+      MAX_CONCURRENT_CODEX: "3"
+      MAX_QUEUED_CODEX: "10"
     read_only: true
     tmpfs:
       - /tmp:size=64M,mode=1777
@@ -41,6 +48,12 @@ services:
       - /home/agent/.claude:/home/claude/.claude
       # Sibling config file claude reads/writes alongside ~/.claude/.
       - /home/agent/.claude.json:/home/claude/.claude.json
+      # Codex CLI (optional). Comment out the next two mounts if you don't
+      # want to serve `provider: "codex"` requests — the server starts fine
+      # without them, only the codex path becomes unusable.
+      - /home/agent/.local/bin/codex:/opt/codex/bin/codex:ro
+      # Codex credentials & state. RW because the CLI refreshes OAuth tokens.
+      - /home/agent/.codex:/home/claude/.codex
     networks:
       - traefik
     labels:

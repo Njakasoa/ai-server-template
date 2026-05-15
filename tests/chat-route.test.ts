@@ -354,6 +354,94 @@ describe("POST /api/v1/chat", () => {
     assert.notStrictEqual(payload.isError, true);
   });
 
+  it("retries without sessionId when attempt 1 reports session_not_found", async () => {
+    // Covers two real-world cases via the same code path:
+    //  1. The CLI purged the session past its retention window (stale id).
+    //  2. The caller fed a sessionId minted by the OTHER provider (e.g. a
+    //     Claude UUID handed to Codex). Both surface as session_not_found
+    //     once the wrapper's regex catches the stderr; the chat route then
+    //     drops the id and starts a fresh conversation transparently.
+    const stages: Array<(fake: FakeProc) => void> = [
+      (fake) => {
+        setImmediate(() => {
+          // stderr matches claude-cli.ts SESSION_MISSING_PATTERNS (`/--resume/i`).
+          fake.stderr.emit("data", Buffer.from("Error: session not found for --resume"));
+          fake.emit("close", 1);
+        });
+      },
+      (fake) => {
+        setImmediate(() => {
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "system",
+                subtype: "init",
+                session_id: "fresh_sess",
+              }) + "\n",
+            ),
+          );
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "assistant",
+                message: { content: [{ type: "text", text: "ok" }] },
+              }) + "\n",
+            ),
+          );
+          fake.stdout.emit(
+            "data",
+            Buffer.from(
+              JSON.stringify({
+                type: "result",
+                subtype: "success",
+                session_id: "fresh_sess",
+                duration_ms: 7,
+                num_turns: 1,
+                result: "ok",
+              }) + "\n",
+            ),
+          );
+          fake.emit("close", 0);
+        });
+      },
+    ];
+    let call = 0;
+    const argvCalls: string[][] = [];
+    __setSpawnForTest(((_bin: string, args: string[]) => {
+      argvCalls.push(args);
+      const fake = makeFakeProc();
+      stages[call++]?.(fake);
+      return fake;
+    }) as never);
+
+    const app = createApp();
+    const res = await app.fetch(
+      new Request("http://x/api/v1/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: "hi", sessionId: "from_other_provider" }),
+      }),
+    );
+    assert.strictEqual(res.status, 200);
+    const frames = parseSse(await readAll(res.body));
+    assert.ok(
+      !frames.some((f) => f.event === "error"),
+      "session_not_found on attempt 1 must not surface as an error frame",
+    );
+    const resultFrame = frames.find((f) => f.event === "result");
+    assert.ok(resultFrame);
+    assert.strictEqual(JSON.parse(resultFrame!.data).result, "ok");
+    assert.strictEqual(call, 2);
+    assert.ok(argvCalls[0].includes("--resume"), "attempt 1 must pass --resume");
+    assert.strictEqual(
+      argvCalls[1].indexOf("--resume"),
+      -1,
+      "attempt 2 must drop --resume",
+    );
+  });
+
   it("does not retry when the failure has stderr (caller can see the cause)", async () => {
     let call = 0;
     __setSpawnForTest(((..._a: unknown[]) => {

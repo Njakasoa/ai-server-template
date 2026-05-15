@@ -1,36 +1,45 @@
 import { Hono } from "hono";
-import { detectClaudeVersion } from "../lib/claude-cli.js";
+import { detectProviderVersion } from "../lib/ai-provider.js";
+import { env } from "../lib/env.js";
 
 const health = new Hono();
 
 const startedAt = Date.now();
-let cachedVersion: string | null | undefined = undefined;
+const cache: Partial<Record<"claude" | "codex", string | null>> = {};
 
-async function getVersion(): Promise<string | null> {
-  if (cachedVersion === undefined) {
-    cachedVersion = await detectClaudeVersion();
+async function getVersion(provider: "claude" | "codex"): Promise<string | null> {
+  if (!(provider in cache)) {
+    cache[provider] = await detectProviderVersion(provider);
   }
-  return cachedVersion;
+  return cache[provider] ?? null;
+}
+
+async function snapshot() {
+  const [claudeCli, codexCli] = await Promise.all([
+    getVersion("claude"),
+    getVersion("codex"),
+  ]);
+  return {
+    claudeCli,
+    codexCli,
+    defaultProvider: env.DEFAULT_PROVIDER,
+    uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
+  };
 }
 
 health.get("/", async (c) => {
-  const version = await getVersion();
+  const snap = await snapshot();
   return c.json({
     ok: true,
     name: "ai-server-template",
     version: "0.1.0",
-    claudeCli: version,
-    uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
+    ...snap,
   });
 });
 
 health.get("/health", async (c) => {
-  const version = await getVersion();
-  return c.json({
-    ok: true,
-    claudeCli: version,
-    uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
-  });
+  const snap = await snapshot();
+  return c.json({ ok: true, ...snap });
 });
 
 export { health };
