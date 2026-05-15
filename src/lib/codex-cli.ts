@@ -233,10 +233,32 @@ class StreamClassifier {
     if (type === "item.completed") {
       const item = parsed.item;
       if (item?.type !== "agent_message" || typeof item.text !== "string") return [];
+      const events: CodexStreamEvent[] = [];
+      // Emit any text not yet delivered as a `delta` before the `message`.
+      // Codex routinely skips `item.updated` for short answers and jumps
+      // straight to `item.completed`, so without this a whole turn would
+      // arrive as a single `message` with zero `delta` events. Consumers
+      // that render the live stream from `delta` only (e.g. the CRM chat
+      // orchestrator) would then show an empty bubble even though the tool
+      // calls embedded in the text still get parsed. Guaranteeing at least
+      // one `delta` keeps codex's wire output shape-compatible with claude.
+      if (
+        item.text.length > this.lastAgentText.length &&
+        item.text.startsWith(this.lastAgentText)
+      ) {
+        events.push({
+          kind: "delta",
+          text: item.text.slice(this.lastAgentText.length),
+          raw: parsed,
+        });
+      } else if (item.text !== this.lastAgentText) {
+        events.push({ kind: "delta", text: item.text, raw: parsed });
+      }
       this.lastAgentText = item.text;
       this.lastCompletedMessage = item.text;
       this.currentAgentMessageId = undefined;
-      return [{ kind: "message", text: item.text, raw: parsed }];
+      events.push({ kind: "message", text: item.text, raw: parsed });
+      return events;
     }
 
     if (type === "turn.completed") {

@@ -95,6 +95,68 @@ describe("runCodexCliStream", () => {
     assert.equal(result.isError, false);
   });
 
+  it("synthesizes a delta when codex jumps straight to item.completed", async () => {
+    // Codex skips `item.updated` for short answers. The wrapper must still
+    // emit one `delta` carrying the full text so delta-only consumers (the
+    // CRM chat orchestrator) render the message instead of an empty bubble.
+    const fake = makeFakeProc();
+    __setCodexSpawnForTest(((..._a: unknown[]) => fake) as never);
+
+    const iter = runCodexCliStream({ prompt: "hi", timeoutMs: 5_000 });
+    setImmediate(() => {
+      emitLine(fake, { type: "thread.started", thread_id: "th_z" });
+      emitLine(fake, { type: "turn.started" });
+      emitLine(fake, {
+        type: "item.started",
+        item: { id: "m9", type: "agent_message", text: "" },
+      });
+      // No item.updated — straight to completed.
+      emitLine(fake, {
+        type: "item.completed",
+        item: { id: "m9", type: "agent_message", text: "Voici la réponse." },
+      });
+      emitLine(fake, { type: "turn.completed", usage: {} });
+      fake.emit("close", 0);
+    });
+
+    const events = await collect(iter);
+    const kinds = events.map((e) => e.kind);
+    assert.deepEqual(kinds, ["session", "delta", "message", "result"]);
+    assert.equal(
+      (events[1] as Extract<CodexStreamEvent, { kind: "delta" }>).text,
+      "Voici la réponse.",
+    );
+    assert.equal(
+      (events[2] as Extract<CodexStreamEvent, { kind: "message" }>).text,
+      "Voici la réponse.",
+    );
+  });
+
+  it("does not duplicate text when deltas already covered the full message", async () => {
+    // When item.updated already streamed the whole text, item.completed
+    // must NOT emit another delta — only the message.
+    const fake = makeFakeProc();
+    __setCodexSpawnForTest(((..._a: unknown[]) => fake) as never);
+
+    const iter = runCodexCliStream({ prompt: "hi", timeoutMs: 5_000 });
+    setImmediate(() => {
+      emitLine(fake, { type: "thread.started", thread_id: "th_w" });
+      emitLine(fake, {
+        type: "item.updated",
+        item: { id: "m8", type: "agent_message", text: "Salut" },
+      });
+      emitLine(fake, {
+        type: "item.completed",
+        item: { id: "m8", type: "agent_message", text: "Salut" },
+      });
+      emitLine(fake, { type: "turn.completed", usage: {} });
+      fake.emit("close", 0);
+    });
+
+    const events = await collect(iter);
+    assert.deepEqual(events.map((e) => e.kind), ["session", "delta", "message", "result"]);
+  });
+
   it("emits an is_error result on turn.failed", async () => {
     const fake = makeFakeProc();
     __setCodexSpawnForTest(((..._a: unknown[]) => fake) as never);
